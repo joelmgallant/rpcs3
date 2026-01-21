@@ -620,12 +620,31 @@ namespace np
 			ifaddrs* p;
 			for (p = ifap; p; p = p->ifa_next)
 			{
+				// Skip interfaces without addresses
+				if (!p->ifa_addr)
+					continue;
+
+				// Skip loopback interfaces
+				if (p->ifa_flags & IFF_LOOPBACK)
+					continue;
+
 				if (p->ifa_addr->sa_family == AF_LINK)
 				{
 					sockaddr_dl* sdp = reinterpret_cast<sockaddr_dl*>(p->ifa_addr);
-					memcpy(ether_address.data(), sdp->sdl_data + sdp->sdl_nlen, 6);
+
+					// Validate hardware address length
+					if (sdp->sdl_alen < 6)
+						continue;
+
+					// Skip all-zero MAC addresses
+					const u8* mac = reinterpret_cast<const u8*>(sdp->sdl_data + sdp->sdl_nlen);
+					if (mac[0] == 0 && mac[1] == 0 && mac[2] == 0 && mac[3] == 0 && mac[4] == 0 && mac[5] == 0)
+						continue;
+
+					memcpy(ether_address.data(), mac, 6);
 					freeifaddrs(ifap);
-					// nph_log.notice("Determined Ethernet address to be %s", ether_to_string(ether_address));
+					nph_log.notice("Discovered Ethernet address %02x:%02x:%02x:%02x:%02x:%02x from interface %s",
+						mac[0], mac[1], mac[2], mac[3], mac[4], mac[5], p->ifa_name);
 					return true;
 				}
 			}
