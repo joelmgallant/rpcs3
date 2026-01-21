@@ -208,7 +208,9 @@ error_code cellNetCtlGetInfo(s32 code, vm::ptr<CellNetCtlInfo> info)
 
 	if (code == CELL_NET_CTL_INFO_ETHER_ADDR)
 	{
-		memcpy(info->ether_addr.data, nph.get_ether_addr().data(), 6);
+		// Placeholder MAC address (locally administered: 02:00:00:00:00:01)
+		constexpr u8 placeholder_mac[6] = {0x02, 0x00, 0x00, 0x00, 0x00, 0x01};
+		memcpy(info->ether_addr.data, placeholder_mac, 6);
 		return CELL_OK;
 	}
 
