@@ -610,15 +610,30 @@ namespace np
 		return true;
 	}
 
+	// Helper to check if MAC address is valid (non-zero, non-broadcast)
+	static bool is_valid_mac(const u8* mac)
+	{
+		// Check for all-zero MAC
+		if (mac[0] == 0 && mac[1] == 0 && mac[2] == 0 && mac[3] == 0 && mac[4] == 0 && mac[5] == 0)
+			return false;
+
+		// Check for broadcast MAC (ff:ff:ff:ff:ff:ff)
+		if (mac[0] == 0xff && mac[1] == 0xff && mac[2] == 0xff && mac[3] == 0xff && mac[4] == 0xff && mac[5] == 0xff)
+			return false;
+
+		return true;
+	}
+
 	bool np_handler::discover_ether_address()
 	{
+		bool discovered = false;
+
 #if defined(__FreeBSD__) || defined(__APPLE__)
 		ifaddrs* ifap;
 
 		if (getifaddrs(&ifap) == 0)
 		{
-			ifaddrs* p;
-			for (p = ifap; p; p = p->ifa_next)
+			for (ifaddrs* p = ifap; p; p = p->ifa_next)
 			{
 				// Skip interfaces without addresses
 				if (!p->ifa_addr)
@@ -636,16 +651,16 @@ namespace np
 					if (sdp->sdl_alen < 6)
 						continue;
 
-					// Skip all-zero MAC addresses
 					const u8* mac = reinterpret_cast<const u8*>(sdp->sdl_data + sdp->sdl_nlen);
-					if (mac[0] == 0 && mac[1] == 0 && mac[2] == 0 && mac[3] == 0 && mac[4] == 0 && mac[5] == 0)
+					if (!is_valid_mac(mac))
 						continue;
 
 					memcpy(ether_address.data(), mac, 6);
-					freeifaddrs(ifap);
 					nph_log.notice("Discovered Ethernet address %02x:%02x:%02x:%02x:%02x:%02x from interface %s",
-						mac[0], mac[1], mac[2], mac[3], mac[4], mac[5], p->ifa_name);
-					return true;
+						ether_address[0], ether_address[1], ether_address[2],
+						ether_address[3], ether_address[4], ether_address[5], p->ifa_name);
+					discovered = true;
+					break;
 				}
 			}
 			freeifaddrs(ifap);
@@ -659,55 +674,94 @@ namespace np
 
 		if (GetAdaptersInfo(reinterpret_cast<PIP_ADAPTER_INFO>(adapter_infos.data()), &size_infos) == NO_ERROR && size_infos)
 		{
-			PIP_ADAPTER_INFO info = reinterpret_cast<PIP_ADAPTER_INFO>(adapter_infos.data());
-			memcpy(ether_address.data(), info[0].Address, 6);
-			// nph_log.notice("Determined Ethernet address to be %s", ether_to_string(ether_address));
-			return true;
+			PIP_ADAPTER_INFO adapter = reinterpret_cast<PIP_ADAPTER_INFO>(adapter_infos.data());
+			while (adapter)
+			{
+				if (adapter->AddressLength >= 6 && is_valid_mac(adapter->Address))
+				{
+					memcpy(ether_address.data(), adapter->Address, 6);
+					nph_log.notice("Discovered Ethernet address %02x:%02x:%02x:%02x:%02x:%02x from adapter %s",
+						ether_address[0], ether_address[1], ether_address[2],
+						ether_address[3], ether_address[4], ether_address[5], adapter->AdapterName);
+					discovered = true;
+					break;
+				}
+				adapter = adapter->Next;
+			}
 		}
 #else
 		ifreq ifr;
 		ifconf ifc;
 		char buf[1024];
-		int success = 0;
 
 		int sock = socket(AF_INET, SOCK_DGRAM, IPPROTO_IP);
-		if (sock == -1)
-			return false;
-
-		ifc.ifc_len = sizeof(buf);
-		ifc.ifc_buf = buf;
-		if (ioctl(sock, SIOCGIFCONF, &ifc) == -1)
-			return false;
-
-		ifreq* it              = ifc.ifc_req;
-		const ifreq* const end = it + (ifc.ifc_len / sizeof(ifreq));
-
-		for (; it != end; ++it)
+		if (sock != -1)
 		{
-			strcpy_trunc(ifr.ifr_name, it->ifr_name);
-			if (ioctl(sock, SIOCGIFFLAGS, &ifr) == 0)
+			ifc.ifc_len = sizeof(buf);
+			ifc.ifc_buf = buf;
+			if (ioctl(sock, SIOCGIFCONF, &ifc) != -1)
 			{
-				if (!(ifr.ifr_flags & IFF_LOOPBACK))
+				ifreq* it              = ifc.ifc_req;
+				const ifreq* const end = it + (ifc.ifc_len / sizeof(ifreq));
+
+				for (; it != end; ++it)
 				{
-					if (ioctl(sock, SIOCGIFHWADDR, &ifr) == 0)
+					strcpy_trunc(ifr.ifr_name, it->ifr_name);
+					if (ioctl(sock, SIOCGIFFLAGS, &ifr) == 0)
 					{
-						success = 1;
-						break;
+						if (!(ifr.ifr_flags & IFF_LOOPBACK))
+						{
+							if (ioctl(sock, SIOCGIFHWADDR, &ifr) == 0)
+							{
+								const u8* mac = reinterpret_cast<const u8*>(ifr.ifr_hwaddr.sa_data);
+								if (is_valid_mac(mac))
+								{
+									memcpy(ether_address.data(), mac, 6);
+									nph_log.notice("Discovered Ethernet address %02x:%02x:%02x:%02x:%02x:%02x from interface %s",
+										mac[0], mac[1], mac[2], mac[3], mac[4], mac[5], ifr.ifr_name);
+									discovered = true;
+									break;
+								}
+							}
+						}
 					}
 				}
 			}
-		}
-
-		if (success)
-		{
-			memcpy(ether_address.data(), ifr.ifr_hwaddr.sa_data, 6);
-			// nph_log.notice("Determined Ethernet address to be %s", ether_to_string(ether_address));
-
-			return true;
+			close(sock);
 		}
 #endif
 
-		return false;
+		if (!discovered)
+		{
+			// Generate a fallback MAC address if discovery failed
+			// Use a locally administered, unicast MAC (02:xx:xx:xx:xx:xx)
+			// Based on a hash of the hostname to keep it consistent across runs
+			nph_log.warning("Failed to discover MAC address from network interfaces, generating fallback");
+
+			char host_buf[256] = {};
+			if (gethostname(host_buf, sizeof(host_buf) - 1) != 0)
+			{
+				strcpy_trunc(host_buf, "rpcs3-fallback");
+			}
+
+			u64 hash = 0;
+			for (const char* p = host_buf; *p; ++p)
+				hash = hash * 31 + static_cast<u8>(*p);
+
+			// Set locally administered bit (bit 1 of first octet) and clear multicast bit (bit 0)
+			ether_address[0] = 0x02;  // Locally administered, unicast
+			ether_address[1] = static_cast<u8>((hash >> 0) & 0xff);
+			ether_address[2] = static_cast<u8>((hash >> 8) & 0xff);
+			ether_address[3] = static_cast<u8>((hash >> 16) & 0xff);
+			ether_address[4] = static_cast<u8>((hash >> 24) & 0xff);
+			ether_address[5] = static_cast<u8>((hash >> 32) & 0xff);
+
+			nph_log.notice("Generated fallback Ethernet address %02x:%02x:%02x:%02x:%02x:%02x",
+				ether_address[0], ether_address[1], ether_address[2],
+				ether_address[3], ether_address[4], ether_address[5]);
+		}
+
+		return true;  // Always succeed - we have a fallback
 	}
 
 	const std::array<u8, 6>& np_handler::get_ether_addr() const
