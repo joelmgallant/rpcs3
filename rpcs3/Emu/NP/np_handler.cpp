@@ -446,15 +446,18 @@ namespace np
 
 		g_fxo->need<named_thread<signaling_handler>>();
 
+		// Always discover MAC address - games may query it regardless of network status
+		// A real PS3 always has a hardware MAC address
+		discover_ether_address();
+
 		is_connected  = (g_cfg.net.net_active == np_internet_status::enabled);
 		is_psn_active = (g_cfg.net.psn_status >= np_psn_status::psn_fake) && is_connected;
 
 		if (get_net_status() == CELL_NET_CTL_STATE_IPObtained)
 		{
-
-			if (!discover_ether_address() || !discover_ip_address())
+			if (!discover_ip_address())
 			{
-				nph_log.error("Failed to discover ethernet or ip address!");
+				nph_log.error("Failed to discover IP address!");
 				is_connected  = false;
 				is_psn_active = false;
 				return;
